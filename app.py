@@ -4,18 +4,18 @@ import numpy as np
 import joblib
 from PIL import Image
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # -----------------------------------
-# LOAD MODEL (KNN + SCALER + PCA)
+# LOAD MODEL
 # -----------------------------------
 model, scaler, pca = joblib.load("model_knn.pkl")
 
 # -----------------------------------
-# FUNGSI: Ekstraksi Fitur + Segmentasi
+# Ekstraksi fitur dan segmentasi
 # -----------------------------------
 def preprocess_and_extract_features(image):
     image = cv2.resize(image, (128, 128))
-
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     lower = np.array([25, 40, 40])
     upper = np.array([90, 255, 255])
@@ -25,11 +25,9 @@ def preprocess_and_extract_features(image):
     gray = cv2.cvtColor(masked_img, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     gray = clahe.apply(gray)
-
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Ekstraksi fitur bentuk
     contours, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         c = max(contours, key=cv2.contourArea)
@@ -44,20 +42,17 @@ def preprocess_and_extract_features(image):
     mean_color = cv2.mean(image)[:3]
     feature_vector = [area, perimeter, aspect_ratio, extent] + list(mean_color)
 
-    # Segmentasi daun berwarna (background hitam)
     segmented = cv2.bitwise_and(image, image, mask=otsu)
-
-    return feature_vector, otsu, segmented, image, hsv
+    return feature_vector, otsu, segmented, image, hsv, contours
 
 # -----------------------------------
-# FUNGSI: Plot Histogram RGB & HSV
+# Histogram
 # -----------------------------------
 def plot_rgb_histogram(image):
-    plt.figure(figsize=(5, 3))
+    plt.figure(figsize=(6, 4))
     for i, col in enumerate(['b', 'g', 'r']):
         hist = cv2.calcHist([image], [i], None, [256], [0, 256])
         plt.plot(hist, color=col)
-        plt.xlim([0, 256])
     plt.title("Histogram RGB")
     st.pyplot(plt.gcf())
     plt.clf()
@@ -65,8 +60,7 @@ def plot_rgb_histogram(image):
 def plot_hsv_histogram(hsv_img):
     h_hist = cv2.calcHist([hsv_img], [0], None, [180], [0, 180])
     s_hist = cv2.calcHist([hsv_img], [1], None, [256], [0, 256])
-
-    plt.figure(figsize=(5, 3))
+    plt.figure(figsize=(6, 4))
     plt.plot(h_hist, label='Hue', color='purple')
     plt.plot(s_hist, label='Saturation', color='orange')
     plt.title("Histogram HSV (H & S)")
@@ -77,40 +71,81 @@ def plot_hsv_histogram(hsv_img):
 # -----------------------------------
 # STREAMLIT UI
 # -----------------------------------
+st.set_page_config(page_title="Klasifikasi Daun Mangrove", layout="wide")
 st.title("🌿 Klasifikasi Daun Mangrove")
-st.markdown("Upload gambar daun (JPG/PNG) untuk memprediksi jenis, menampilkan hasil segmentasi, dan histogram warna.")
+st.markdown("Upload gambar daun (JPG/PNG/JPEG) untuk memprediksi jenis, segmentasi, histogram, dan fitur.")
 
 uploaded_file = st.file_uploader("📂 Upload Gambar Daun", type=["jpg", "png", "jpeg"])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
-    st.image(image, caption="🖼️ Gambar Asli", use_column_width=True)
+    st.image(image, caption="🖼️ Gambar Asli", use_container_width=True)
 
-    # Konversi ke BGR (OpenCV format)
     image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-    # Ekstraksi fitur + ambil gambar Otsu & segmentasi
-    features, otsu_mask, segmented_leaf, original_bgr, hsv_img = preprocess_and_extract_features(image_cv)
+    features, otsu_mask, segmented_leaf, original_bgr, hsv_img, contours = preprocess_and_extract_features(image_cv)
 
     # Prediksi
     features_scaled = scaler.transform([features])
     features_pca = pca.transform(features_scaled)
     prediction = model.predict(features_pca)[0]
+
+    # Confidence
+    distances, _ = model.kneighbors(features_pca)
+    confidence_score = np.exp(-np.mean(distances)) * 100
+    confidence_score = np.clip(confidence_score, 0, 100)
+
     st.success(f"🌱 Prediksi Jenis Daun: **{prediction}**")
+    st.info(f"🔍 Confidence: **{confidence_score:.2f}%**")
 
-    # Tampilkan Segmentasi Otsu
-    st.markdown("### 🔳 Segmentasi Otsu (Biner)")
-    st.image(otsu_mask, channels="GRAY", use_column_width=True)
+    # Layout dengan 2 kolom (opsional)
+    col1, col2 = st.columns(2)
 
-    # Tampilkan Hasil Segmentasi Warna
-    st.markdown("### 🌿 Segmentasi Daun Berwarna")
-    st.image(cv2.cvtColor(segmented_leaf, cv2.COLOR_BGR2RGB), caption="Daun Tersegmentasi", use_column_width=True)
+    with col1:
+        st.markdown("### 🔳 Segmentasi Otsu (Biner)")
+        st.image(otsu_mask, channels="GRAY", use_container_width=True)
 
-    # Tampilkan Histogram RGB
-    st.markdown("### 📊 Histogram Warna RGB")
-    plot_rgb_histogram(original_bgr)
+    with col2:
+        st.markdown("### 🌿 Segmentasi Daun Berwarna")
+        st.image(cv2.cvtColor(segmented_leaf, cv2.COLOR_BGR2RGB), caption="Daun Tersegmentasi", use_container_width=True)
 
-    # Tampilkan Histogram HSV
-    st.markdown("### 📊Histogram HSV (H & S)")
-    plot_hsv_histogram(hsv_img)
+    # Kontur
+    overlay = original_bgr.copy()
+    cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2)
+    st.markdown("### 🧭 Kontur Daun")
+    st.image(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), caption="Kontur Daun", use_container_width=True)
+
+    # Histogram
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown("### 📊 Histogram Warna RGB")
+        plot_rgb_histogram(original_bgr)
+
+    with col4:
+        st.markdown("### 📊 Histogram HSV (H & S)")
+        plot_hsv_histogram(hsv_img)
+
+    # Tabel Fitur
+    st.markdown("### 📐 Fitur Ekstraksi")
+    df_features = pd.DataFrame({
+        "Fitur": [
+            "Luas (Area)",
+            "Keliling (Perimeter)",
+            "Aspect Ratio",
+            "Extent",
+            "Mean B",
+            "Mean G",
+            "Mean R"
+        ],
+        "Nilai": [
+            round(features[0], 2),
+            round(features[1], 2),
+            round(features[2], 2),
+            round(features[3], 2),
+            round(features[4], 2),
+            round(features[5], 2),
+            round(features[6], 2)
+        ]
+    })
+    st.table(df_features)
+
 
