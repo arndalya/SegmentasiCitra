@@ -1,84 +1,120 @@
 import os
-import glob
 import cv2
 import numpy as np
-import joblib
-from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report
+import joblib
+from tqdm import tqdm
 
-def extract_features_from_image(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    resized = cv2.resize(gray, (100, 100))
-    features = resized.flatten()
-    return features
+# -----------------------------------------------
+# 1. AKUISISI & PERSIAPAN DATA
+# -----------------------------------------------
 
-DATASET_DIR = "dataset/mangrove"
-LABELS = ["Bruguiera", "Sonneratia", "Lumnitzera"]
+def load_images_from_folder(folder):
+    images = []
+    labels = []
+    for label in os.listdir(folder):
+        label_folder = os.path.join(folder, label)
+        for filename in os.listdir(label_folder):
+            if filename.endswith(".jpg") or filename.endswith(".png"):
+                img_path = os.path.join(label_folder, filename)
+                image = cv2.imread(img_path)
+                if image is not None:
+                    images.append(image)
+                    labels.append(label)
+    return images, labels
 
-X = []
-y = []
+# -----------------------------------------------
+# 2-6. PRAPROSES, GRAYSCALE, OTSU, EKSTRAKSI FITUR
+# -----------------------------------------------
 
-print("[INFO] Memulai ekstraksi fitur dari dataset...")
+def preprocess_and_extract_features(image):
+    # Resize
+    image = cv2.resize(image, (128, 128))
 
-for label in LABELS:
-    class_dir = os.path.join(DATASET_DIR, label)
-    image_paths = glob.glob(os.path.join(class_dir, "*.jpg")) + \
-                  glob.glob(os.path.join(class_dir, "*.jpeg")) + \
-                  glob.glob(os.path.join(class_dir, "*.png"))
-    
-    print(f"[INFO] Memproses label: {label}, Jumlah gambar ditemukan: {len(image_paths)}")
-    
-    if len(image_paths) == 0:
-        print(f"[WARNING] Tidak ditemukan gambar untuk kelas {label}, periksa folder dan ekstensi file!")
-    
-    for img_path in image_paths:
-        print(f"[DEBUG] Membaca gambar: {img_path}")
-        img = cv2.imread(img_path)
-        if img is None:
-            print(f"[ERROR] Gagal membaca gambar {img_path}, melewati file ini.")
-            continue
-        
-        features = extract_features_from_image(img)
-        X.append(features)
-        y.append(label)
+    # HSV masking
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    lower = np.array([25, 40, 40])  # rentang hijau
+    upper = np.array([90, 255, 255])
+    mask = cv2.inRange(hsv, lower, upper)
+    masked_img = cv2.bitwise_and(image, image, mask=mask)
 
-if len(X) == 0:
-    print("[ERROR] Tidak ada fitur yang berhasil diekstrak, hentikan proses.")
-    exit(1)
+    # Grayscale
+    gray = cv2.cvtColor(masked_img, cv2.COLOR_BGR2GRAY)
 
-X = np.array(X)
-y = np.array(y)
+    # Otsu Thresholding
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-print(f"[INFO] Total data fitur: {X.shape}, Total label: {y.shape}")
+    # Ekstraksi fitur bentuk
+    contours, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        c = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(c)
+        perimeter = cv2.arcLength(c, True)
+        x, y, w, h = cv2.boundingRect(c)
+        aspect_ratio = float(w) / h if h != 0 else 0
+        extent = float(area) / (w * h) if w * h != 0 else 0
+    else:
+        area = perimeter = aspect_ratio = extent = 0
 
-# Label encoding dari string ke angka
-label_encoder = LabelEncoder()
-y_encoded = label_encoder.fit_transform(y)
+    # Ekstraksi fitur warna dominan (rata-rata RGB)
+    mean_color = cv2.mean(image)[:3]  # ambil R,G,B
 
-# Skala fitur
+    # Gabungkan fitur (bentuk + warna)
+    feature_vector = [area, perimeter, aspect_ratio, extent] + list(mean_color)
+    return feature_vector
+
+# -----------------------------------------------
+# 7. AUGMENTASI (opsional: flip horizontal saja)
+# -----------------------------------------------
+
+def augment(image):
+    return [image, cv2.flip(image, 1)]
+
+# -----------------------------------------------
+# 8. KLASIFIKASI
+# -----------------------------------------------
+
+def prepare_data(folder):
+    images, labels = load_images_from_folder(folder)
+    X, y = [], []
+
+    for img, label in tqdm(zip(images, labels), total=len(images)):
+        for augmented in augment(img):
+            features = preprocess_and_extract_features(augmented)
+            X.append(features)
+            y.append(label)
+
+    return np.array(X), np.array(y)
+
+# MAIN PIPELINE
+train_folder = 'dataset/train'
+test_folder = 'dataset/test'
+
+# Load dan proses data latih & uji
+X_train, y_train = prepare_data(train_folder)
+X_test, y_test = prepare_data(test_folder)
+
+# Standarisasi fitur
 scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
 
-# Split data train dan test
-X_train, X_test, y_train, y_test = train_test_split(
-    X_scaled, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded)
+# Reduksi dimensi dengan PCA
+pca = PCA(n_components=4)  # Misalnya reduksi jadi 4 dimensi
+X_train_pca = pca.fit_transform(X_train_scaled)
+X_test_pca = pca.transform(X_test_scaled)
 
-print("[INFO] Melatih model KNN...")
-knn = KNeighborsClassifier(n_neighbors=3)
-knn.fit(X_train, y_train)
+# Klasifikasi dengan KNN
+model = KNeighborsClassifier(n_neighbors=3)
+model.fit(X_train_pca, y_train)
 
-# Evaluasi model
-y_pred = knn.predict(X_test)
-acc = accuracy_score(y_test, y_pred)
-print(f"[INFO] Akurasi pada data test: {acc:.4f}")
-print("[INFO] Laporan klasifikasi:")
-print(classification_report(y_test, y_pred, target_names=label_encoder.classes_))
+# Simpan model
+joblib.dump((model, scaler, pca), 'model_knn.pkl')
 
-# Simpan model, scaler, dan label encoder
-joblib.dump(knn, "mangrove_model_knn.pkl")
-joblib.dump(scaler, "scaler.pkl")
-joblib.dump(label_encoder, "label_encoder.pkl")
-
-print("[INFO] Model, scaler, dan label encoder berhasil disimpan.")
+# Evaluasi
+y_pred = model.predict(X_test_pca)
+print(classification_report(y_test, y_pred))
